@@ -399,3 +399,86 @@ elevenlabs.post('/recognize', async (req, res) => {
 });
 
 router.use('/elevenlabs', elevenlabs);
+
+const fishaudio = express.Router();
+
+fishaudio.post('/voices', async (req, res) => {
+    try {
+        const apiKey = readSecret(req.user.directories, SECRET_KEYS.FISH_AUDIO);
+        if (!apiKey) {
+            console.warn('Fish Audio API key not found');
+            return res.sendStatus(400);
+        }
+
+        const response = await fetch('https://api.fish.audio/v1/models?page_size=100&self=true', {
+            headers: {
+                'Authorization': `Bearer ${apiKey}`,
+            },
+        });
+
+        if (!response.ok) {
+            const text = await response.text();
+            console.warn(`Fish Audio voices fetch failed: HTTP ${response.status} - ${text}`);
+            return res.sendStatus(500);
+        }
+
+        const responseJson = await response.json();
+        return res.json({ voices: responseJson.items || [] });
+    } catch (error) {
+        console.error(error);
+        return res.sendStatus(500);
+    }
+});
+
+fishaudio.post('/synthesize', async (req, res) => {
+    try {
+        const apiKey = readSecret(req.user.directories, SECRET_KEYS.FISH_AUDIO);
+        if (!apiKey) {
+            console.warn('Fish Audio API key not found');
+            return res.sendStatus(400);
+        }
+
+        const { text, reference_id, model, format, latency, chunk_length } = req.body;
+
+        if (!text || !reference_id) {
+            console.warn('Fish Audio synthesis request missing text or reference_id');
+            return res.sendStatus(400);
+        }
+
+        console.debug('Fish Audio TTS request:', { reference_id, model, format, latency });
+
+        const requestBody = {
+            text: text,
+            reference_id: reference_id,
+            format: format || 'mp3',
+            latency: latency || 'normal',
+            chunk_length: chunk_length || 200,
+        };
+
+        const response = await fetch('https://api.fish.audio/v1/tts', {
+            method: 'POST',
+            headers: {
+                'Authorization': `Bearer ${apiKey}`,
+                'Content-Type': 'application/json',
+            },
+            body: JSON.stringify(requestBody),
+        });
+
+        if (!response.ok) {
+            const text = await response.text();
+            console.warn(`Fish Audio synthesis failed: HTTP ${response.status} - ${text}`);
+            return res.sendStatus(500);
+        }
+
+        const contentType = format === 'wav' ? 'audio/wav' :
+            format === 'opus' ? 'audio/opus' :
+                format === 'pcm' ? 'audio/pcm' : 'audio/mpeg';
+        res.set('Content-Type', contentType);
+        forwardFetchResponse(response, res);
+    } catch (error) {
+        console.error(error);
+        return res.sendStatus(500);
+    }
+});
+
+router.use('/fishaudio', fishaudio);
