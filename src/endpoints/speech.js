@@ -410,7 +410,7 @@ fishaudio.post('/voices', async (req, res) => {
             return res.sendStatus(400);
         }
 
-        const response = await fetch('https://api.fish.audio/v1/models?page_size=100&self=true', {
+        const response = await fetch('https://api.fish.audio/model?page_size=100&self=true', {
             headers: {
                 'Authorization': `Bearer ${apiKey}`,
             },
