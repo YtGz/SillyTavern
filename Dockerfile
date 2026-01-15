@@ -18,7 +18,7 @@ COPY . ./
 
 RUN \
   echo "*** Install packages ***" && \
-  bun install --production --frozen-lockfile
+  bun install --production
 
 # Create config directory and link config.yaml
 RUN \
