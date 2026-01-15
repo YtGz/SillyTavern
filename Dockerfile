@@ -1,23 +1,24 @@
-FROM node:lts-alpine3.22
+FROM oven/bun:alpine
 
 # Arguments
 ARG APP_HOME=/home/node/app
 
 # Install system dependencies
-RUN apk add --no-cache gcompat tini git git-lfs
+RUN apk add --no-cache tini git git-lfs dos2unix
 
 # Create app directory
 WORKDIR ${APP_HOME}
 
 # Set NODE_ENV to production
 ENV NODE_ENV=production
+ENV NO_UPDATE_CHECK=true
 
 # Bundle app source
 COPY . ./
 
 RUN \
-  echo "*** Install npm packages ***" && \
-  npm ci --no-audit --no-fund --loglevel=error --no-progress --omit=dev && npm cache clean --force
+  echo "*** Install packages ***" && \
+  bun install --production --frozen-lockfile
 
 # Create config directory and link config.yaml
 RUN \
@@ -28,7 +29,7 @@ RUN \
 # Pre-compile public libraries
 RUN \
   echo "*** Run Webpack ***" && \
-  node "./docker/build-lib.js"
+  bun run "./docker/build-lib.js"
 
 # Set the entrypoint script
 RUN \

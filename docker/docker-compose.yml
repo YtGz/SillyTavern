@@ -6,6 +6,7 @@ services:
     image: ghcr.io/sillytavern/sillytavern:latest
     environment:
       - NODE_ENV=production
+      - NO_UPDATE_CHECK=true
       - FORCE_COLOR=1
     ports:
       - "8000:8000"

@@ -6,7 +6,7 @@ if [ ! -e "config/config.yaml" ]; then
 fi
 
 # Execute postinstall to auto-populate config.yaml with missing values
-npm run postinstall
+bun run postinstall
 
 # Start the server
-exec node server.js --listen "$@"
+exec bun run server.js --listen "$@"
