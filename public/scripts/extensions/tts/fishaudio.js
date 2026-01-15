@@ -10,6 +10,7 @@ class FishAudioTtsProvider {
 
     defaultSettings = {
         voiceMap: {},
+        customVoices: '',
         model: 's1',
         format: 'mp3',
         latency: 'normal',
@@ -49,10 +50,12 @@ class FishAudioTtsProvider {
             <label for="fishaudio_tts_chunk_length">Chunk Length: <span id="fishaudio_tts_chunk_length_output"></span></label>
             <input id="fishaudio_tts_chunk_length" type="range" value="${this.defaultSettings.chunkLength}" min="100" max="300" step="10" />
             <hr>
+            <label for="fishaudio_tts_custom_voices">Custom Voices</label>
+            <textarea id="fishaudio_tts_custom_voices" class="text_pole" rows="3" placeholder="MyVoice=802e3bc2b27e49c2995d23ef70e6ac89&#10;Another Voice=abc123..."></textarea>
             <span>
                 <small>
-                    Browse voices at <a href="https://fish.audio/" target="_blank">fish.audio</a>.
-                    Copy the model ID from the URL (e.g., <code>802e3bc2b27e49c2995d23ef70e6ac89</code>).
+                    Add custom voices as <code>Name=reference_id</code>, one per line.
+                    Browse voices at <a href="https://fish.audio/" target="_blank">fish.audio</a> and copy the model ID from the URL.
                 </small>
             </span>
         </div>
@@ -79,7 +82,9 @@ class FishAudioTtsProvider {
         this.settings.format = $('#fishaudio_tts_format').find(':selected').val();
         this.settings.latency = $('#fishaudio_tts_latency').find(':selected').val();
         this.settings.chunkLength = Number($('#fishaudio_tts_chunk_length').val());
+        this.settings.customVoices = String($('#fishaudio_tts_custom_voices').val());
         $('#fishaudio_tts_chunk_length_output').text(this.settings.chunkLength);
+        this.parseCustomVoices();
         saveTtsProviderSettings();
     }
 
@@ -108,11 +113,13 @@ class FishAudioTtsProvider {
         $('#fishaudio_tts_latency').val(this.settings.latency);
         $('#fishaudio_tts_chunk_length').val(this.settings.chunkLength);
         $('#fishaudio_tts_chunk_length_output').text(this.settings.chunkLength);
+        $('#fishaudio_tts_custom_voices').val(this.settings.customVoices);
 
         $('#fishaudio_tts_model').on('change', this.onSettingsChange.bind(this));
         $('#fishaudio_tts_format').on('change', this.onSettingsChange.bind(this));
         $('#fishaudio_tts_latency').on('change', this.onSettingsChange.bind(this));
         $('#fishaudio_tts_chunk_length').on('input', this.onSettingsChange.bind(this));
+        $('#fishaudio_tts_custom_voices').on('input', this.onSettingsChange.bind(this));
 
         try {
             await this.checkReady();
@@ -187,24 +194,34 @@ class FishAudioTtsProvider {
     }
 
     /**
-     * Fetch available voice objects from Fish Audio API
+     * Parse custom voices from settings textarea
+     */
+    parseCustomVoices() {
+        const customVoices = [];
+        const lines = this.settings.customVoices.split('\n');
+        for (const line of lines) {
+            const trimmed = line.trim();
+            if (!trimmed || !trimmed.includes('=')) continue;
+            const [name, ...rest] = trimmed.split('=');
+            const voiceId = rest.join('=').trim();
+            if (name && voiceId) {
+                customVoices.push({
+                    name: name.trim(),
+                    voice_id: voiceId,
+                    lang: 'en',
+                    preview_url: null,
+                });
+            }
+        }
+        this.voices = customVoices;
+    }
+
+    /**
+     * Fetch available voice objects from custom voices setting
      * @returns {Promise<Array>} Array of voice objects
      */
     async fetchTtsVoiceObjects() {
-        const response = await fetch('/api/speech/fishaudio/voices', {
-            method: 'POST',
-            headers: getRequestHeaders({ omitContentType: true }),
-        });
-        if (!response.ok) {
-            throw new Error(`HTTP ${response.status}. See server console for details.`);
-        }
-        const responseJson = await response.json();
-        this.voices = responseJson.voices.map(voice => ({
-            name: voice.title,
-            voice_id: voice._id,
-            lang: voice.languages?.[0] || 'en',
-            preview_url: voice.cover_image,
-        }));
+        this.parseCustomVoices();
         return this.voices;
     }
 }

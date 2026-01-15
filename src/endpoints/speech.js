@@ -402,34 +402,6 @@ router.use('/elevenlabs', elevenlabs);
 
 const fishaudio = express.Router();
 
-fishaudio.post('/voices', async (req, res) => {
-    try {
-        const apiKey = readSecret(req.user.directories, SECRET_KEYS.FISH_AUDIO);
-        if (!apiKey) {
-            console.warn('Fish Audio API key not found');
-            return res.sendStatus(400);
-        }
-
-        const response = await fetch('https://api.fish.audio/model?page_size=100&self=true', {
-            headers: {
-                'Authorization': `Bearer ${apiKey}`,
-            },
-        });
-
-        if (!response.ok) {
-            const text = await response.text();
-            console.warn(`Fish Audio voices fetch failed: HTTP ${response.status} - ${text}`);
-            return res.sendStatus(500);
-        }
-
-        const responseJson = await response.json();
-        return res.json({ voices: responseJson.items || [] });
-    } catch (error) {
-        console.error(error);
-        return res.sendStatus(500);
-    }
-});
-
 fishaudio.post('/synthesize', async (req, res) => {
     try {
         const apiKey = readSecret(req.user.directories, SECRET_KEYS.FISH_AUDIO);
