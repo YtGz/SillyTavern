@@ -379,6 +379,13 @@ async function postSetupTasks(result) {
     console.log('\n' + getSeparator(plainGoToLog.length) + '\n');
 
     setupLogLevel();
+
+    // Initialize Voice WebSocket server on all HTTP servers
+    const { voiceWs } = await import('./endpoints/voice-ws.js');
+    for (const server of result.servers) {
+        voiceWs.initialize(server, app);
+    }
+
     serverEvents.emit(EVENT_NAMES.SERVER_STARTED, { url: browserLaunchUrl });
 }
 

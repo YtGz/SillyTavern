@@ -18,4 +18,12 @@ export const EVENT_NAMES = Object.freeze({
      * Emitted when the server has started.
      */
     SERVER_STARTED: 'server-started',
+    /**
+     * Emitted when a voice message is received via WebSocket.
+     */
+    VOICE_MESSAGE: 'voice:message',
+    /**
+     * Emitted when a character switch is requested via WebSocket.
+     */
+    VOICE_SWITCH: 'voice:switch',
 });

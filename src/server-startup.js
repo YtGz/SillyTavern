@@ -55,6 +55,7 @@ import { router as backupsRouter } from './endpoints/backups.js';
  * @property {boolean} v4Failed If the server failed to start on IPv4
  * @property {boolean} useIPv6 If use IPv6
  * @property {boolean} useIPv4 If use IPv4
+ * @property {import('http').Server[]} servers Array of HTTP/HTTPS servers created
  */
 
 /**
@@ -191,6 +192,8 @@ export class ServerStartup {
     constructor(app, cliArgs) {
         this.app = app;
         this.cliArgs = cliArgs;
+        /** @type {import('http').Server[]} */
+        this.servers = [];
     }
 
     /**
@@ -242,6 +245,7 @@ export class ServerStartup {
                 passphrase: String(this.cliArgs.keyPassphrase ?? ''),
             };
             const server = https.createServer(sslOptions, this.app);
+            this.servers.push(server);
             server.on('error', reject);
             server.on('listening', resolve);
 
@@ -265,6 +269,7 @@ export class ServerStartup {
     #createHttpServer(url, ipVersion) {
         return new Promise((resolve, reject) => {
             const server = http.createServer(this.app);
+            this.servers.push(server);
             server.on('error', reject);
             server.on('listening', resolve);
 
@@ -385,7 +390,7 @@ export class ServerStartup {
         }
 
         const [v6Failed, v4Failed] = await this.#startHTTPorHTTPS(useIPv6, useIPv4);
-        const result = { v6Failed, v4Failed, useIPv6, useIPv4 };
+        const result = { v6Failed, v4Failed, useIPv6, useIPv4, servers: this.servers };
         this.#handleServerListenFail(result);
         return result;
     }
