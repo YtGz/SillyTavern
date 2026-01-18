@@ -118,8 +118,22 @@ export class HeadlessBrowser extends EventEmitter {
             { timeout: this.#timeout },
         );
 
+        // Wait for characters to be loaded (they're fetched async on page load)
+        await this.#page.waitForFunction(
+            () => {
+                // @ts-ignore - SillyTavern.getContext() is the proper API
+                if (typeof SillyTavern === 'undefined' || typeof SillyTavern.getContext !== 'function') return false;
+                const ctx = SillyTavern.getContext();
+                return ctx.characters && ctx.characters.length > 0;
+            },
+            { timeout: this.#timeout },
+        ).catch(() => {
+            // Characters might not load if none exist - that's okay
+            console.log('[HeadlessBrowser] No characters loaded (timeout or empty)');
+        });
+
         // Additional wait for any async initialization
-        await new Promise(resolve => setTimeout(resolve, 1000));
+        await new Promise(resolve => setTimeout(resolve, 500));
     }
 
     /**
@@ -128,8 +142,10 @@ export class HeadlessBrowser extends EventEmitter {
      */
     async hasCharacterSelected() {
         return this.#page.evaluate(() => {
-            // @ts-ignore - this_chid is a global in ST
-            return typeof this_chid !== 'undefined' && this_chid !== null && this_chid !== undefined;
+            // @ts-ignore - SillyTavern.getContext() is the proper API
+            if (typeof SillyTavern === 'undefined') return false;
+            const ctx = SillyTavern.getContext();
+            return ctx.characterId !== undefined && ctx.characterId !== null;
         });
     }
 
@@ -139,8 +155,10 @@ export class HeadlessBrowser extends EventEmitter {
      */
     async getCurrentCharacter() {
         return this.#page.evaluate(() => {
-            // @ts-ignore - name2 is a global in ST
-            return typeof name2 !== 'undefined' ? name2 : null;
+            // @ts-ignore - SillyTavern.getContext() is the proper API
+            if (typeof SillyTavern === 'undefined') return null;
+            const ctx = SillyTavern.getContext();
+            return ctx.name2 || null;
         });
     }
 
@@ -150,9 +168,11 @@ export class HeadlessBrowser extends EventEmitter {
      */
     async getCharacterList() {
         return this.#page.evaluate(() => {
-            // @ts-ignore - characters is a global in ST
-            if (typeof characters === 'undefined') return [];
-            return characters.map(c => ({
+            // @ts-ignore - SillyTavern.getContext() is the proper API
+            if (typeof SillyTavern === 'undefined') return [];
+            const ctx = SillyTavern.getContext();
+            if (!ctx.characters) return [];
+            return ctx.characters.map(c => ({
                 name: c.name,
                 avatar: c.avatar,
             }));
@@ -166,12 +186,16 @@ export class HeadlessBrowser extends EventEmitter {
      */
     async selectCharacter(characterName) {
         const result = await this.#page.evaluate(async (name) => {
-            // @ts-ignore - characters and selectCharacterById are globals in ST
-            if (typeof characters === 'undefined' || typeof selectCharacterById === 'undefined') {
+            // @ts-ignore - SillyTavern.getContext() is the proper API
+            if (typeof SillyTavern === 'undefined') {
+                return { success: false, error: 'ST not ready' };
+            }
+            const ctx = SillyTavern.getContext();
+            if (!ctx.characters || !ctx.selectCharacterById) {
                 return { success: false, error: 'ST not ready' };
             }
 
-            const charIndex = characters.findIndex(c =>
+            const charIndex = ctx.characters.findIndex(c =>
                 c.name.toLowerCase() === name.toLowerCase() ||
                 c.avatar.toLowerCase().includes(name.toLowerCase()),
             );
@@ -181,7 +205,7 @@ export class HeadlessBrowser extends EventEmitter {
             }
 
             try {
-                await selectCharacterById(String(charIndex));
+                await ctx.selectCharacterById(String(charIndex));
                 return { success: true };
             } catch (e) {
                 return { success: false, error: e.message };
@@ -230,18 +254,22 @@ export class HeadlessBrowser extends EventEmitter {
             }
         }, message);
 
-        // Trigger the send
+        // Trigger the send using SillyTavern context API
         await this.#page.evaluate(() => {
-            // @ts-ignore - sendTextareaMessage is exported from script.js
-            if (typeof sendTextareaMessage === 'function') {
-                sendTextareaMessage();
-            } else {
-                // Fallback: click the send button
-                const sendBtn = document.querySelector('#send_but');
-                if (sendBtn) {
-                    // @ts-ignore
-                    sendBtn.click();
+            // @ts-ignore - SillyTavern.getContext() is the proper API
+            if (typeof SillyTavern !== 'undefined') {
+                const ctx = SillyTavern.getContext();
+                // Use generate function which handles all the prompt building
+                if (ctx.generate) {
+                    ctx.generate('normal');
+                    return;
                 }
+            }
+            // Fallback: click the send button
+            const sendBtn = document.querySelector('#send_but');
+            if (sendBtn) {
+                // @ts-ignore
+                sendBtn.click();
             }
         });
 
@@ -265,26 +293,28 @@ export class HeadlessBrowser extends EventEmitter {
 
             // Track the initial chat length
             this.#page.evaluate(() => {
-                // @ts-ignore
-                return typeof chat !== 'undefined' ? chat.length : 0;
+                // @ts-ignore - SillyTavern.getContext() is the proper API
+                if (typeof SillyTavern === 'undefined') return 0;
+                const ctx = SillyTavern.getContext();
+                return ctx.chat ? ctx.chat.length : 0;
             }).then(initialLength => {
                 lastMessageIndex = initialLength;
             });
 
             // Set up event listener for generation end in the page
             this.#page.evaluate(() => {
-                // @ts-ignore - eventSource is a global in ST
-                if (typeof eventSource !== 'undefined' && typeof event_types !== 'undefined') {
+                // @ts-ignore - SillyTavern.getContext() is the proper API
+                if (typeof SillyTavern === 'undefined') return;
+                const ctx = SillyTavern.getContext();
+                if (ctx.eventSource && ctx.eventTypes) {
                     // @ts-ignore
                     window.__voiceGenerationEnded = false;
                     const handler = () => {
                         // @ts-ignore
                         window.__voiceGenerationEnded = true;
-                        // @ts-ignore
-                        eventSource.removeListener(event_types.GENERATION_ENDED, handler);
+                        ctx.eventSource.removeListener(ctx.eventTypes.GENERATION_ENDED, handler);
                     };
-                    // @ts-ignore
-                    eventSource.once(event_types.GENERATION_ENDED, handler);
+                    ctx.eventSource.once(ctx.eventTypes.GENERATION_ENDED, handler);
                 }
             }).catch(() => {});
 
@@ -292,9 +322,14 @@ export class HeadlessBrowser extends EventEmitter {
             checkInterval = setInterval(async () => {
                 try {
                     const state = await this.#page.evaluate((lastIdx) => {
-                        // @ts-ignore - chat, is_send_press are globals
-                        const currentChat = typeof chat !== 'undefined' ? chat : [];
-                        const isGenerating = typeof is_send_press !== 'undefined' && is_send_press;
+                        // @ts-ignore - SillyTavern.getContext() is the proper API
+                        if (typeof SillyTavern === 'undefined') {
+                            return { isGenerating: false, generationEnded: false, text: '', chatLength: 0 };
+                        }
+                        const ctx = SillyTavern.getContext();
+                        const currentChat = ctx.chat || [];
+                        // Check streamingProcessor for active generation
+                        const isGenerating = ctx.streamingProcessor?.isRunning || false;
                         // @ts-ignore
                         const ended = window.__voiceGenerationEnded === true;
 
@@ -341,8 +376,10 @@ export class HeadlessBrowser extends EventEmitter {
 
                         // Get final text from chat array (most reliable)
                         const finalText = await this.#page.evaluate((lastIdx) => {
-                            // @ts-ignore
-                            const currentChat = typeof chat !== 'undefined' ? chat : [];
+                            // @ts-ignore - SillyTavern.getContext() is the proper API
+                            if (typeof SillyTavern === 'undefined') return '';
+                            const ctx = SillyTavern.getContext();
+                            const currentChat = ctx.chat || [];
                             if (currentChat.length > lastIdx) {
                                 const lastMsg = currentChat[currentChat.length - 1];
                                 if (!lastMsg.is_user && !lastMsg.is_system) {
@@ -400,9 +437,11 @@ export class HeadlessBrowser extends EventEmitter {
      */
     async stopGeneration() {
         await this.#page.evaluate(() => {
-            // @ts-ignore - stopGeneration is a global in ST
-            if (typeof stopGeneration === 'function') {
-                stopGeneration();
+            // @ts-ignore - SillyTavern.getContext() is the proper API
+            if (typeof SillyTavern === 'undefined') return;
+            const ctx = SillyTavern.getContext();
+            if (ctx.stopGeneration) {
+                ctx.stopGeneration();
             }
         });
     }
@@ -413,9 +452,11 @@ export class HeadlessBrowser extends EventEmitter {
      */
     async getChatHistory() {
         return this.#page.evaluate(() => {
-            // @ts-ignore - chat is a global in ST
-            if (typeof chat === 'undefined') return [];
-            return chat.map(m => ({
+            // @ts-ignore - SillyTavern.getContext() is the proper API
+            if (typeof SillyTavern === 'undefined') return [];
+            const ctx = SillyTavern.getContext();
+            if (!ctx.chat) return [];
+            return ctx.chat.map(m => ({
                 is_user: m.is_user,
                 mes: m.mes,
                 name: m.name,
@@ -429,9 +470,11 @@ export class HeadlessBrowser extends EventEmitter {
      */
     async clearChat() {
         await this.#page.evaluate(() => {
-            // @ts-ignore - clearChat is a global in ST
-            if (typeof clearChat === 'function') {
-                clearChat();
+            // @ts-ignore - SillyTavern.getContext() is the proper API
+            if (typeof SillyTavern === 'undefined') return;
+            const ctx = SillyTavern.getContext();
+            if (ctx.clearChat) {
+                ctx.clearChat();
             }
         });
     }
