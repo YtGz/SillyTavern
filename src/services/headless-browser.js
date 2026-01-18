@@ -244,34 +244,20 @@ export class HeadlessBrowser extends EventEmitter {
         // Set up response collection before triggering generation
         const responsePromise = this.#collectResponse(onChunk);
 
-        // Set the message text and trigger generation
+        // Set the message text in the textarea
         await this.#page.evaluate((msg) => {
             const textarea = document.querySelector('#send_textarea');
             if (textarea) {
                 // @ts-ignore
                 textarea.value = msg;
+                // Dispatch input event to trigger any listeners
                 textarea.dispatchEvent(new Event('input', { bubbles: true }));
             }
         }, message);
 
-        // Trigger the send using SillyTavern context API
-        await this.#page.evaluate(() => {
-            // @ts-ignore - SillyTavern.getContext() is the proper API
-            if (typeof SillyTavern !== 'undefined') {
-                const ctx = SillyTavern.getContext();
-                // Use generate function which handles all the prompt building
-                if (ctx.generate) {
-                    ctx.generate('normal');
-                    return;
-                }
-            }
-            // Fallback: click the send button
-            const sendBtn = document.querySelector('#send_but');
-            if (sendBtn) {
-                // @ts-ignore
-                sendBtn.click();
-            }
-        });
+        // Click the send button - this is the most reliable way to trigger generation
+        // It properly adds the user message and triggers the AI response
+        await this.#page.click('#send_but');
 
         // Wait for response
         const result = await responsePromise;
@@ -289,7 +275,6 @@ export class HeadlessBrowser extends EventEmitter {
             let lastMessageIndex = -1;
             let checkInterval;
             let timeoutId;
-            let generationEnded = false;
 
             // Track the initial chat length
             this.#page.evaluate(() => {
@@ -301,66 +286,103 @@ export class HeadlessBrowser extends EventEmitter {
                 lastMessageIndex = initialLength;
             });
 
-            // Set up event listener for generation end in the page
+            // Set up event listeners in the page for streaming and completion
             this.#page.evaluate(() => {
+                // @ts-ignore
+                window.__voiceStreamText = '';
+                // @ts-ignore
+                window.__voiceGenerationEnded = false;
+                // @ts-ignore
+                window.__voiceMessageReceived = false;
+
                 // @ts-ignore - SillyTavern.getContext() is the proper API
                 if (typeof SillyTavern === 'undefined') return;
                 const ctx = SillyTavern.getContext();
+
                 if (ctx.eventSource && ctx.eventTypes) {
-                    // @ts-ignore
-                    window.__voiceGenerationEnded = false;
-                    const handler = () => {
+                    // Listen for generation end
+                    const endHandler = () => {
                         // @ts-ignore
                         window.__voiceGenerationEnded = true;
-                        ctx.eventSource.removeListener(ctx.eventTypes.GENERATION_ENDED, handler);
+                        ctx.eventSource.removeListener(ctx.eventTypes.GENERATION_ENDED, endHandler);
                     };
-                    ctx.eventSource.once(ctx.eventTypes.GENERATION_ENDED, handler);
+                    ctx.eventSource.once(ctx.eventTypes.GENERATION_ENDED, endHandler);
+
+                    // Listen for message received (contains the streamed text)
+                    const msgHandler = (messageIndex) => {
+                        // @ts-ignore
+                        window.__voiceMessageReceived = true;
+                        const chat = ctx.chat || [];
+                        if (chat[messageIndex]) {
+                            // @ts-ignore
+                            window.__voiceStreamText = chat[messageIndex].mes || '';
+                        }
+                        ctx.eventSource.removeListener(ctx.eventTypes.MESSAGE_RECEIVED, msgHandler);
+                    };
+                    ctx.eventSource.once(ctx.eventTypes.MESSAGE_RECEIVED, msgHandler);
                 }
+
+                // Also set up a MutationObserver on the streaming text element
+                const observer = new MutationObserver(() => {
+                    const streamingEl = document.querySelector('#chat .last_mes .mes_text');
+                    if (streamingEl) {
+                        const text = streamingEl.textContent || '';
+                        // Ignore placeholder text
+                        if (text && text !== '...' && text !== '…') {
+                            // @ts-ignore
+                            window.__voiceStreamText = text;
+                        }
+                    }
+                });
+
+                // Start observing once a new message appears
+                const checkForNewMessage = setInterval(() => {
+                    const lastMes = document.querySelector('#chat .last_mes .mes_text');
+                    if (lastMes) {
+                        observer.observe(lastMes, { childList: true, characterData: true, subtree: true });
+                        clearInterval(checkForNewMessage);
+                        // Store observer for cleanup
+                        // @ts-ignore
+                        window.__voiceObserver = observer;
+                    }
+                }, 50);
+
+                // Cleanup after 60 seconds max
+                setTimeout(() => {
+                    clearInterval(checkForNewMessage);
+                    observer.disconnect();
+                }, 60000);
             }).catch(() => {});
 
-            // Poll for new content
+            // Poll for new content from the page
             checkInterval = setInterval(async () => {
                 try {
                     const state = await this.#page.evaluate((lastIdx) => {
-                        // @ts-ignore - SillyTavern.getContext() is the proper API
-                        if (typeof SillyTavern === 'undefined') {
-                            return { isGenerating: false, generationEnded: false, text: '', chatLength: 0 };
-                        }
-                        const ctx = SillyTavern.getContext();
-                        const currentChat = ctx.chat || [];
-                        // Check streamingProcessor for active generation
-                        const isGenerating = ctx.streamingProcessor?.isRunning || false;
+                        // @ts-ignore
+                        const streamText = window.__voiceStreamText || '';
                         // @ts-ignore
                         const ended = window.__voiceGenerationEnded === true;
+                        // @ts-ignore
+                        const received = window.__voiceMessageReceived === true;
 
-                        // Get the latest assistant message
-                        let latestText = '';
-                        if (currentChat.length > lastIdx) {
-                            const lastMsg = currentChat[currentChat.length - 1];
-                            if (!lastMsg.is_user && !lastMsg.is_system) {
-                                latestText = lastMsg.mes || '';
-                            }
-                        }
-
-                        // Also check the streaming element for real-time content
-                        const streamingEl = document.querySelector('#chat .last_mes .mes_text');
-                        if (streamingEl) {
-                            const streamText = streamingEl.textContent || '';
-                            if (streamText.length > latestText.length) {
-                                latestText = streamText;
-                            }
+                        // Also check chat length
+                        let chatLength = 0;
+                        // @ts-ignore
+                        if (typeof SillyTavern !== 'undefined') {
+                            const ctx = SillyTavern.getContext();
+                            chatLength = ctx.chat ? ctx.chat.length : 0;
                         }
 
                         return {
-                            isGenerating,
+                            text: streamText,
                             generationEnded: ended,
-                            text: latestText,
-                            chatLength: currentChat.length,
+                            messageReceived: received,
+                            chatLength,
                         };
                     }, lastMessageIndex);
 
-                    // Emit new chunks
-                    if (state.text.length > fullText.length) {
+                    // Emit new chunks (skip placeholder)
+                    if (state.text && state.text !== '...' && state.text !== '…' && state.text.length > fullText.length) {
                         const newContent = state.text.substring(fullText.length);
                         fullText = state.text;
                         if (onChunk) {
@@ -369,12 +391,12 @@ export class HeadlessBrowser extends EventEmitter {
                         this.emit('chunk', newContent);
                     }
 
-                    // Check if generation is complete (using event or is_send_press flag)
-                    if ((state.generationEnded || !state.isGenerating) && state.chatLength > lastMessageIndex && fullText.length > 0) {
-                        // Wait a tiny bit for any final content to settle
-                        await new Promise(r => setTimeout(r, 100));
+                    // Check if generation is complete
+                    if (state.generationEnded && state.chatLength > lastMessageIndex) {
+                        // Wait for final content to settle
+                        await new Promise(r => setTimeout(r, 200));
 
-                        // Get final text from chat array (most reliable)
+                        // Get final text from chat array
                         const finalText = await this.#page.evaluate((lastIdx) => {
                             // @ts-ignore - SillyTavern.getContext() is the proper API
                             if (typeof SillyTavern === 'undefined') return '';
@@ -389,6 +411,7 @@ export class HeadlessBrowser extends EventEmitter {
                             return '';
                         }, lastMessageIndex);
 
+                        // Emit any remaining content
                         if (finalText.length > fullText.length) {
                             const newContent = finalText.substring(fullText.length);
                             fullText = finalText;
@@ -407,7 +430,7 @@ export class HeadlessBrowser extends EventEmitter {
                 } catch (err) {
                     // Page might be navigating, ignore
                 }
-            }, 100);
+            }, 50); // Poll more frequently for smoother streaming
 
             // Timeout after configured duration
             timeoutId = setTimeout(() => {
@@ -417,15 +440,26 @@ export class HeadlessBrowser extends EventEmitter {
                     success: fullText.length > 0,
                     error: fullText.length > 0 ? undefined : 'Generation timed out',
                 });
-            }, this.#timeout * 2); // Double timeout for generation
+            }, this.#timeout * 2);
 
             const cleanup = () => {
                 if (checkInterval) clearInterval(checkInterval);
                 if (timeoutId) clearTimeout(timeoutId);
-                // Clean up the flag
+                // Clean up page state
                 this.#page.evaluate(() => {
                     // @ts-ignore
+                    if (window.__voiceObserver) {
+                        // @ts-ignore
+                        window.__voiceObserver.disconnect();
+                    }
+                    // @ts-ignore
+                    delete window.__voiceStreamText;
+                    // @ts-ignore
                     delete window.__voiceGenerationEnded;
+                    // @ts-ignore
+                    delete window.__voiceMessageReceived;
+                    // @ts-ignore
+                    delete window.__voiceObserver;
                 }).catch(() => {});
             };
         });
