@@ -2,6 +2,7 @@ import http from 'node:http';
 import https from 'node:https';
 import { WebSocketServer, WebSocket } from 'ws';
 import { getUserDirectories } from '../users.js';
+import { headlessBrowser } from '../services/headless-browser.js';
 
 /**
  * @typedef {Object} MessageCommand
@@ -28,7 +29,27 @@ import { getUserDirectories } from '../users.js';
  */
 
 /**
- * @typedef {MessageCommand | SwitchCommand | GenerateCommand | AuthCommand} VoiceCommand
+ * @typedef {Object} StatusCommand
+ * @property {'status'} action
+ */
+
+/**
+ * @typedef {Object} CharactersCommand
+ * @property {'characters'} action
+ */
+
+/**
+ * @typedef {Object} HistoryCommand
+ * @property {'history'} action
+ */
+
+/**
+ * @typedef {Object} StopCommand
+ * @property {'stop'} action
+ */
+
+/**
+ * @typedef {MessageCommand | SwitchCommand | GenerateCommand | AuthCommand | StatusCommand | CharactersCommand | HistoryCommand | StopCommand} VoiceCommand
  */
 
 /**
@@ -40,6 +61,7 @@ import { getUserDirectories } from '../users.js';
 /**
  * @typedef {Object} StreamEnd
  * @property {'end'} type
+ * @property {string} [fullText] - Complete response text
  */
 
 /**
@@ -49,17 +71,38 @@ import { getUserDirectories } from '../users.js';
  */
 
 /**
+ * @typedef {Object} StatusResponse
+ * @property {'status'} type
+ * @property {boolean} ready
+ * @property {string|null} character
+ * @property {boolean} headlessReady
+ */
+
+/**
+ * @typedef {Object} CharactersResponse
+ * @property {'characters'} type
+ * @property {Array<{name: string, avatar: string}>} characters
+ */
+
+/**
+ * @typedef {Object} HistoryResponse
+ * @property {'history'} type
+ * @property {Array<{is_user: boolean, mes: string, name: string}>} messages
+ */
+
+/**
  * @typedef {Object} ErrorResponse
  * @property {'error'} type
  * @property {string} message
  */
 
 /**
- * @typedef {StreamChunk | StreamEnd | CharacterSwitched | ErrorResponse} VoiceResponse
+ * @typedef {StreamChunk | StreamEnd | CharacterSwitched | StatusResponse | CharactersResponse | HistoryResponse | ErrorResponse} VoiceResponse
  */
 
 /**
  * VoiceWebSocketServer manages WebSocket connections for voice commands
+ * Uses a headless browser to leverage ST's full prompt-building logic
  */
 export class VoiceWebSocketServer {
     /** @type {WebSocketServer | null} */
@@ -67,6 +110,12 @@ export class VoiceWebSocketServer {
 
     /** @type {NodeJS.Timeout | null} */
     #pingInterval = null;
+
+    /** @type {boolean} */
+    #headlessInitialized = false;
+
+    /** @type {Promise<void> | null} */
+    #headlessInitPromise = null;
 
     /**
      * Initialize the WebSocket server and attach to HTTP server
@@ -97,6 +146,36 @@ export class VoiceWebSocketServer {
 
         this.#startHeartbeat();
         console.log('Voice WebSocket server initialized at /ws/voice');
+
+        // Start headless browser initialization in background
+        this.#initHeadlessBrowser();
+    }
+
+    /**
+     * Initialize the headless browser (lazy, on first connection or explicitly)
+     * @returns {Promise<void>}
+     */
+    async #initHeadlessBrowser() {
+        if (this.#headlessInitialized) {
+            return;
+        }
+
+        if (this.#headlessInitPromise) {
+            return this.#headlessInitPromise;
+        }
+
+        this.#headlessInitPromise = (async () => {
+            try {
+                await headlessBrowser.initialize();
+                this.#headlessInitialized = true;
+                console.log('[Voice WS] Headless browser ready');
+            } catch (error) {
+                console.error('[Voice WS] Failed to initialize headless browser:', error);
+                this.#headlessInitPromise = null; // Allow retry
+            }
+        })();
+
+        return this.#headlessInitPromise;
     }
 
     /**
@@ -131,9 +210,13 @@ export class VoiceWebSocketServer {
             console.error('Voice WebSocket error:', error);
         });
 
-        // Send welcome message
-        this.#send(ws, { type: 'chunk', text: 'Connected to voice WebSocket' });
-        this.#send(ws, { type: 'end' });
+        // Send welcome message with status
+        this.#send(ws, {
+            type: 'status',
+            ready: true,
+            character: null,
+            headlessReady: this.#headlessInitialized,
+        });
     }
 
     /**
@@ -169,11 +252,23 @@ export class VoiceWebSocketServer {
             case 'auth':
                 this.#handleAuthCommand(ws, command);
                 break;
+            case 'status':
+                await this.#handleStatusCommand(ws);
+                break;
+            case 'characters':
+                await this.#handleCharactersCommand(ws);
+                break;
+            case 'history':
+                await this.#handleHistoryCommand(ws);
+                break;
             case 'message':
                 await this.#handleMessageCommand(ws, command);
                 break;
             case 'switch':
                 await this.#handleSwitchCommand(ws, command);
+                break;
+            case 'stop':
+                await this.#handleStopCommand(ws);
                 break;
             case 'generate':
                 await this.#handleGenerateCommand(ws, command);
@@ -200,7 +295,70 @@ export class VoiceWebSocketServer {
     }
 
     /**
-     * Handle message command - sends text to chat
+     * Handle status command - returns current state
+     * @param {WebSocket} ws
+     */
+    async #handleStatusCommand(ws) {
+        let character = null;
+
+        if (this.#headlessInitialized) {
+            try {
+                character = await headlessBrowser.getCurrentCharacter();
+            } catch {
+                // Ignore
+            }
+        }
+
+        this.#send(ws, {
+            type: 'status',
+            ready: true,
+            character,
+            headlessReady: this.#headlessInitialized,
+        });
+    }
+
+    /**
+     * Handle characters command - returns available characters
+     * @param {WebSocket} ws
+     */
+    async #handleCharactersCommand(ws) {
+        if (!this.#headlessInitialized) {
+            await this.#initHeadlessBrowser();
+        }
+
+        if (!this.#headlessInitialized) {
+            this.#sendError(ws, 'Headless browser not ready');
+            return;
+        }
+
+        try {
+            const characters = await headlessBrowser.getCharacterList();
+            this.#send(ws, { type: 'characters', characters });
+        } catch (error) {
+            this.#sendError(ws, `Failed to get characters: ${error.message}`);
+        }
+    }
+
+    /**
+     * Handle history command - returns chat history
+     * @param {WebSocket} ws
+     */
+    async #handleHistoryCommand(ws) {
+        if (!this.#headlessInitialized) {
+            this.#sendError(ws, 'Headless browser not ready');
+            return;
+        }
+
+        try {
+            const messages = await headlessBrowser.getChatHistory();
+            this.#send(ws, { type: 'history', messages });
+        } catch (error) {
+            this.#sendError(ws, `Failed to get history: ${error.message}`);
+        }
+    }
+
+    /**
+     * Handle message command - sends text to chat via headless browser
      * @param {WebSocket & { user?: Object, currentCharacter?: string }} ws
      * @param {MessageCommand} command
      */
@@ -212,30 +370,33 @@ export class VoiceWebSocketServer {
             return;
         }
 
-        console.log(`[Voice WS] Received message: "${text}"`);
-
-        // Emit event that can be listened to by other parts of the system
-        const { serverEvents, EVENT_NAMES } = await import('../server-events.js');
-
-        // Emit the voice message event
-        serverEvents.emit(EVENT_NAMES.VOICE_MESSAGE, {
-            text,
-            character: ws.currentCharacter,
-            user: ws.user,
-            // Callback to stream response chunks back to client
-            streamChunk: (chunk) => this.#send(ws, { type: 'chunk', text: chunk }),
-            streamEnd: () => this.#send(ws, { type: 'end' }),
-        });
-
-        // For demo purposes, echo back the message
-        // In production, this would be replaced by actual chat integration
-        this.#send(ws, { type: 'chunk', text: `Received: "${text}"` });
-
-        if (ws.currentCharacter) {
-            this.#send(ws, { type: 'chunk', text: ` (current character: ${ws.currentCharacter})` });
+        // Ensure headless browser is ready
+        if (!this.#headlessInitialized) {
+            await this.#initHeadlessBrowser();
         }
 
-        this.#send(ws, { type: 'end' });
+        if (!this.#headlessInitialized) {
+            this.#sendError(ws, 'Headless browser not ready. Please wait and try again.');
+            return;
+        }
+
+        console.log(`[Voice WS] Sending message via headless browser: "${text.substring(0, 50)}${text.length > 50 ? '...' : ''}"`);
+
+        try {
+            // Send message through headless browser and stream response
+            const result = await headlessBrowser.sendMessage(text, (chunk) => {
+                this.#send(ws, { type: 'chunk', text: chunk });
+            });
+
+            if (result.success) {
+                this.#send(ws, { type: 'end', fullText: result.text });
+            } else {
+                this.#sendError(ws, result.error || 'Generation failed');
+            }
+        } catch (error) {
+            console.error('[Voice WS] Message error:', error);
+            this.#sendError(ws, `Message error: ${error.message}`);
+        }
     }
 
     /**
@@ -251,23 +412,56 @@ export class VoiceWebSocketServer {
             return;
         }
 
+        // Ensure headless browser is ready
+        if (!this.#headlessInitialized) {
+            await this.#initHeadlessBrowser();
+        }
+
+        if (!this.#headlessInitialized) {
+            this.#sendError(ws, 'Headless browser not ready');
+            return;
+        }
+
         console.log(`[Voice WS] Switching to character: "${character}"`);
 
-        // Store the current character on the connection
-        ws.currentCharacter = character;
+        try {
+            const success = await headlessBrowser.selectCharacter(character);
 
-        // Emit event for character switch
-        const { serverEvents, EVENT_NAMES } = await import('../server-events.js');
-        serverEvents.emit(EVENT_NAMES.VOICE_SWITCH, {
-            character,
-            user: ws.user,
-        });
+            if (success) {
+                ws.currentCharacter = character;
+                const actualName = await headlessBrowser.getCurrentCharacter();
+                this.#send(ws, { type: 'character_switched', character: actualName || character });
+            } else {
+                this.#sendError(ws, `Failed to switch to character "${character}"`);
+            }
+        } catch (error) {
+            console.error('[Voice WS] Switch error:', error);
+            this.#sendError(ws, `Switch error: ${error.message}`);
+        }
+    }
 
-        this.#send(ws, { type: 'character_switched', character });
+    /**
+     * Handle stop command - stops ongoing generation
+     * @param {WebSocket} ws
+     */
+    async #handleStopCommand(ws) {
+        if (!this.#headlessInitialized) {
+            this.#sendError(ws, 'Headless browser not ready');
+            return;
+        }
+
+        try {
+            await headlessBrowser.stopGeneration();
+            this.#send(ws, { type: 'chunk', text: 'Generation stopped' });
+            this.#send(ws, { type: 'end' });
+        } catch (error) {
+            this.#sendError(ws, `Stop error: ${error.message}`);
+        }
     }
 
     /**
      * Handle generate command - calls the chat-completions endpoint and streams response
+     * This is the low-level API bypass, use 'message' for full ST integration
      * @param {WebSocket & { user?: Object, currentCharacter?: string, cookies?: string, csrfToken?: string }} ws
      * @param {GenerateCommand} command
      */
@@ -327,13 +521,14 @@ export class VoiceWebSocketServer {
         const reader = response.body.getReader();
         const decoder = new TextDecoder();
         let buffer = '';
+        let fullText = '';
 
         try {
             while (true) {
                 const { done, value } = await reader.read();
 
                 if (done) {
-                    this.#send(ws, { type: 'end' });
+                    this.#send(ws, { type: 'end', fullText });
                     break;
                 }
 
@@ -348,7 +543,7 @@ export class VoiceWebSocketServer {
                         const data = line.slice(6);
 
                         if (data === '[DONE]') {
-                            this.#send(ws, { type: 'end' });
+                            this.#send(ws, { type: 'end', fullText });
                             return;
                         }
 
@@ -361,11 +556,13 @@ export class VoiceWebSocketServer {
                                 || '';
 
                             if (content) {
+                                fullText += content;
                                 this.#send(ws, { type: 'chunk', text: content });
                             }
                         } catch {
                             // Non-JSON data line, might be a raw text chunk
                             if (data.trim()) {
+                                fullText += data;
                                 this.#send(ws, { type: 'chunk', text: data });
                             }
                         }
@@ -430,10 +627,17 @@ export class VoiceWebSocketServer {
     /**
      * Clean up resources
      */
-    dispose() {
+    async dispose() {
         if (this.#pingInterval) {
             clearInterval(this.#pingInterval);
         }
+
+        // Dispose headless browser
+        if (this.#headlessInitialized) {
+            await headlessBrowser.dispose();
+            this.#headlessInitialized = false;
+        }
+
         this.#wss?.close();
     }
 }
