@@ -275,6 +275,7 @@ export class HeadlessBrowser extends EventEmitter {
             let lastMessageIndex = -1;
             let checkInterval;
             let timeoutId;
+            let lastEmittedLength = 0;
 
             // Track the initial chat length
             this.#page.evaluate(() => {
@@ -286,84 +287,64 @@ export class HeadlessBrowser extends EventEmitter {
                 lastMessageIndex = initialLength;
             });
 
-            // Set up event listeners in the page for streaming and completion
+            // Set up event listeners in the page for streaming tokens and completion
             this.#page.evaluate(() => {
                 // @ts-ignore
-                window.__voiceStreamText = '';
+                window.__voiceStreamTokens = [];
                 // @ts-ignore
                 window.__voiceGenerationEnded = false;
                 // @ts-ignore
-                window.__voiceMessageReceived = false;
+                window.__voiceLastTokenIndex = 0;
 
                 // @ts-ignore - SillyTavern.getContext() is the proper API
                 if (typeof SillyTavern === 'undefined') return;
                 const ctx = SillyTavern.getContext();
 
                 if (ctx.eventSource && ctx.eventTypes) {
+                    // Listen for each streaming token
+                    const tokenHandler = (text) => {
+                        // text is the cumulative streamed text so far
+                        // @ts-ignore
+                        window.__voiceStreamTokens.push(text);
+                    };
+                    ctx.eventSource.on(ctx.eventTypes.STREAM_TOKEN_RECEIVED, tokenHandler);
+                    // @ts-ignore
+                    window.__voiceTokenHandler = tokenHandler;
+
                     // Listen for generation end
                     const endHandler = () => {
                         // @ts-ignore
                         window.__voiceGenerationEnded = true;
                         ctx.eventSource.removeListener(ctx.eventTypes.GENERATION_ENDED, endHandler);
+                        // Clean up token handler
+                        // @ts-ignore
+                        if (window.__voiceTokenHandler) {
+                            // @ts-ignore
+                            ctx.eventSource.removeListener(ctx.eventTypes.STREAM_TOKEN_RECEIVED, window.__voiceTokenHandler);
+                        }
                     };
                     ctx.eventSource.once(ctx.eventTypes.GENERATION_ENDED, endHandler);
-
-                    // Listen for message received (contains the streamed text)
-                    const msgHandler = (messageIndex) => {
-                        // @ts-ignore
-                        window.__voiceMessageReceived = true;
-                        const chat = ctx.chat || [];
-                        if (chat[messageIndex]) {
-                            // @ts-ignore
-                            window.__voiceStreamText = chat[messageIndex].mes || '';
-                        }
-                        ctx.eventSource.removeListener(ctx.eventTypes.MESSAGE_RECEIVED, msgHandler);
-                    };
-                    ctx.eventSource.once(ctx.eventTypes.MESSAGE_RECEIVED, msgHandler);
                 }
-
-                // Also set up a MutationObserver on the streaming text element
-                const observer = new MutationObserver(() => {
-                    const streamingEl = document.querySelector('#chat .last_mes .mes_text');
-                    if (streamingEl) {
-                        const text = streamingEl.textContent || '';
-                        // Ignore placeholder text
-                        if (text && text !== '...' && text !== '…') {
-                            // @ts-ignore
-                            window.__voiceStreamText = text;
-                        }
-                    }
-                });
-
-                // Start observing once a new message appears
-                const checkForNewMessage = setInterval(() => {
-                    const lastMes = document.querySelector('#chat .last_mes .mes_text');
-                    if (lastMes) {
-                        observer.observe(lastMes, { childList: true, characterData: true, subtree: true });
-                        clearInterval(checkForNewMessage);
-                        // Store observer for cleanup
-                        // @ts-ignore
-                        window.__voiceObserver = observer;
-                    }
-                }, 50);
-
-                // Cleanup after 60 seconds max
-                setTimeout(() => {
-                    clearInterval(checkForNewMessage);
-                    observer.disconnect();
-                }, 60000);
             }).catch(() => {});
 
-            // Poll for new content from the page
+            // Poll for new streaming tokens from the page
             checkInterval = setInterval(async () => {
                 try {
                     const state = await this.#page.evaluate((lastIdx) => {
                         // @ts-ignore
-                        const streamText = window.__voiceStreamText || '';
+                        const tokens = window.__voiceStreamTokens || [];
+                        // @ts-ignore
+                        const lastIndex = window.__voiceLastTokenIndex || 0;
                         // @ts-ignore
                         const ended = window.__voiceGenerationEnded === true;
+
+                        // Get new tokens since last check
+                        const newTokens = tokens.slice(lastIndex);
                         // @ts-ignore
-                        const received = window.__voiceMessageReceived === true;
+                        window.__voiceLastTokenIndex = tokens.length;
+
+                        // Get the latest cumulative text (last token has full text so far)
+                        const latestText = newTokens.length > 0 ? newTokens[newTokens.length - 1] : '';
 
                         // Also check chat length
                         let chatLength = 0;
@@ -374,27 +355,31 @@ export class HeadlessBrowser extends EventEmitter {
                         }
 
                         return {
-                            text: streamText,
+                            latestText,
+                            hasNewTokens: newTokens.length > 0,
                             generationEnded: ended,
-                            messageReceived: received,
                             chatLength,
                         };
                     }, lastMessageIndex);
 
-                    // Emit new chunks (skip placeholder)
-                    if (state.text && state.text !== '...' && state.text !== '…' && state.text.length > fullText.length) {
-                        const newContent = state.text.substring(fullText.length);
-                        fullText = state.text;
-                        if (onChunk) {
-                            onChunk(newContent);
+                    // Emit new content if we have new tokens
+                    if (state.hasNewTokens && state.latestText) {
+                        // The token event gives cumulative text, so extract the new part
+                        const newContent = state.latestText.substring(lastEmittedLength);
+                        if (newContent && newContent !== '...' && newContent !== '…') {
+                            lastEmittedLength = state.latestText.length;
+                            fullText = state.latestText;
+                            if (onChunk) {
+                                onChunk(newContent);
+                            }
+                            this.emit('chunk', newContent);
                         }
-                        this.emit('chunk', newContent);
                     }
 
                     // Check if generation is complete
                     if (state.generationEnded && state.chatLength > lastMessageIndex) {
-                        // Wait for final content to settle
-                        await new Promise(r => setTimeout(r, 200));
+                        // Wait a moment for final content
+                        await new Promise(r => setTimeout(r, 100));
 
                         // Get final text from chat array
                         const finalText = await this.#page.evaluate((lastIdx) => {
@@ -430,7 +415,7 @@ export class HeadlessBrowser extends EventEmitter {
                 } catch (err) {
                     // Page might be navigating, ignore
                 }
-            }, 50); // Poll more frequently for smoother streaming
+            }, 30); // Poll frequently for smooth streaming
 
             // Timeout after configured duration
             timeoutId = setTimeout(() => {
@@ -448,18 +433,13 @@ export class HeadlessBrowser extends EventEmitter {
                 // Clean up page state
                 this.#page.evaluate(() => {
                     // @ts-ignore
-                    if (window.__voiceObserver) {
-                        // @ts-ignore
-                        window.__voiceObserver.disconnect();
-                    }
-                    // @ts-ignore
-                    delete window.__voiceStreamText;
+                    delete window.__voiceStreamTokens;
                     // @ts-ignore
                     delete window.__voiceGenerationEnded;
                     // @ts-ignore
-                    delete window.__voiceMessageReceived;
+                    delete window.__voiceLastTokenIndex;
                     // @ts-ignore
-                    delete window.__voiceObserver;
+                    delete window.__voiceTokenHandler;
                 }).catch(() => {});
             };
         });
