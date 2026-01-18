@@ -59,8 +59,12 @@ export class HeadlessBrowser extends EventEmitter {
 
         console.log('[HeadlessBrowser] Launching browser...');
 
+        // Use system Chromium if PUPPETEER_EXECUTABLE_PATH is set (Docker/Alpine)
+        const executablePath = process.env.PUPPETEER_EXECUTABLE_PATH || undefined;
+
         this.#browser = await puppeteer.launch({
             headless: this.#headless,
+            executablePath,
             args: [
                 '--no-sandbox',
                 '--disable-setuid-sandbox',

@@ -3,8 +3,22 @@ FROM oven/bun:alpine
 # Arguments
 ARG APP_HOME=/home/node/app
 
-# Install system dependencies
-RUN apk add --no-cache tini git git-lfs dos2unix
+# Install system dependencies including Chromium for Puppeteer
+RUN apk add --no-cache \
+    tini \
+    git \
+    git-lfs \
+    dos2unix \
+    chromium \
+    nss \
+    freetype \
+    harfbuzz \
+    ca-certificates \
+    ttf-freefont
+
+# Tell Puppeteer to use system Chromium
+ENV PUPPETEER_SKIP_CHROMIUM_DOWNLOAD=true
+ENV PUPPETEER_EXECUTABLE_PATH=/usr/bin/chromium-browser
 
 # Create app directory
 WORKDIR ${APP_HOME}
